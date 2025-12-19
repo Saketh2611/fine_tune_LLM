@@ -1,0 +1,8 @@
+torch
+transformers
+peft
+gradio
+accelerate
+protobuf
+sentencepiece
+scipy
