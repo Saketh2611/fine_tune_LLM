@@ -1,85 +1,88 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 import gradio as gr
 
 # --------------------------------------------------------------------
-# 1. SETUP PATHS
+# 1. SETUP PATHS & OFFLOAD FOLDER
 # --------------------------------------------------------------------
-# This is the path to the folder where you pasted your files
 adapter_path = "./model" 
-
-# This is the base model your adapters were trained on
 base_model_name = "mistralai/Mistral-7B-v0.1"
 
-print("⏳ Loading model... this might take a minute...")
+# Create offload folder to prevent "KeyError"
+offload_folder = "./offload_folder"
+if not os.path.exists(offload_folder):
+    os.makedirs(offload_folder)
+
+print("⏳ Loading model with detailed offload configuration...")
 
 # --------------------------------------------------------------------
-# 2. LOAD BASE MODEL
+# 2. CONFIGURE 4-BIT LOAD
 # --------------------------------------------------------------------
-# We load the base Mistral model first
-base_model = AutoModelForCausalLM.from_pretrained(
-    base_model_name,
-    torch_dtype=torch.float16,
-    device_map="auto",
+bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
-    low_cpu_mem_usage=True
-    # load_in_4bit=True  # Uncomment this line if you have a GPU and installed bitsandbytes
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    llm_int8_enable_fp32_cpu_offload=True
 )
 
 # --------------------------------------------------------------------
-# 3. LOAD YOUR FINE-TUNED ADAPTERS
+# 3. LOAD BASE MODEL
 # --------------------------------------------------------------------
-# Now we merge your fine-tuned "brain" into the base model
-model = PeftModel.from_pretrained(base_model, adapter_path)
-model = model.merge_and_unload() # Optimizes the model for speed
+base_model = AutoModelForCausalLM.from_pretrained(
+    base_model_name,
+    quantization_config=bnb_config,
+    device_map="auto",
+    torch_dtype=torch.float16,
+    offload_folder=offload_folder,
+    low_cpu_mem_usage=True
+)
 
-# Load the tokenizer (converts text to numbers)
-tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
+# --------------------------------------------------------------------
+# 4. LOAD ADAPTERS
+# --------------------------------------------------------------------
+model = PeftModel.from_pretrained(
+    base_model, 
+    adapter_path,
+    offload_folder=offload_folder,
+    device_map="auto"
+)
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
 print("✅ Model loaded successfully!")
 
 # --------------------------------------------------------------------
-# 4. DEFINE THE CHAT FUNCTION
+# 5. CHAT FUNCTION
 # --------------------------------------------------------------------
 def ask_medical_bot(message, history):
-    # Format the prompt exactly like we did in training: <s>[INST] ... [/INST]
     prompt = f"<s>[INST] {message} [/INST]"
+    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    
-    # Generate the response
     outputs = model.generate(
         **inputs,
-        max_new_tokens=200,    # Adjust length of answer
-        temperature=0.3,       # Lower = more factual, Higher = more creative
+        max_new_tokens=200,
         do_sample=True,
+        temperature=0.3,
         top_p=0.9
     )
     
-    # Decode the result (convert numbers back to text)
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Clean up the response to remove the original question
-    # The model often repeats the prompt, so we split by [/INST] and take the second part
     if "[/INST]" in response:
         response = response.split("[/INST]")[1].strip()
-        
     return response
 
 # --------------------------------------------------------------------
-# 5. CREATE THE UI (GRADIO)
+# 6. LAUNCH APP
 # --------------------------------------------------------------------
-# We use ChatInterface for a nice "ChatGPT-style" look
+# [FIXED] Removed 'theme="soft"' to prevent the TypeError
 demo = gr.ChatInterface(
     fn=ask_medical_bot,
-    title="🏥 Medical Assistant AI",
-    description="Ask me about symptoms, treatments, or medical advice. (Powered by Fine-Tuned Mistral 7B)",
-    examples=["What is the treatment for acute bronchitis?", "What are the symptoms of flu?", "How do I treat a burn?"],
-    theme="soft"
+    title="🏥 Medical AI Assistant",
+    description="Fine-tuned Mistral 7B (Running Locally with Disk Offload)"
 )
 
-# Launch the app
 if __name__ == "__main__":
     demo.launch()
