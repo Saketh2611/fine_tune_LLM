@@ -2,22 +2,24 @@
 
 A specialized medical chatbot powered by a **Fine-Tuned Mistral 7B** model. This application uses **LoRA (Low-Rank Adaptation)** adapters trained on medical flashcards to answer health-related queries with high accuracy.
 
-The interface is built with **Gradio**, offering a clean, ChatGPT-like user experience that runs locally on your machine.
+It is engineered to run on **consumer hardware** by utilizing **4-bit quantization** (Windows) and **MPS acceleration** (Mac).
 
 ---
 
 ## 🚀 Features
 
 * **Specialized Knowledge:** Fine-tuned on the `medalpaca/medical_meadow_medical_flashcards` dataset.
-* **Efficient Inference:** Supports **4-bit quantization** (QLoRA) to run on consumer GPUs (Nvidia RTX 3050/3060/4060).
-* **Cross-Platform:** Optimized instructions for both **Windows (CUDA)** and **Mac (MPS/Apple Silicon)**.
-* **User Interface:** Web-based chat interface using Gradio.
+* **Efficient Inference:**
+    * **Windows:** Uses **QLoRA (4-bit)** with Disk Offloading to run on 6GB+ VRAM cards.
+    * **Mac:** Uses **Metal Performance Shaders (MPS)** for hardware acceleration on M1/M2/M3 chips.
+* **Hardware Resilience:** Implements offloading techniques to prevent "Out of Memory" crashes.
+* **User Interface:** Clean, browser-based chat interface built with **Gradio**.
 
 ---
 
 ## 📂 Project Structure
 
-Ensure your project folder looks exactly like this before running:
+Ensure your project folder looks exactly like this.
 
 ```text
 medical-ai-app/
@@ -29,7 +31,7 @@ medical-ai-app/
 │   ├── tokenizer.model
 │   └── special_tokens_map.json
 │
-├── app.py                     # Main application script (Code provided below)
+├── app.py                     # Main application script (Choose version below)
 ├── requirements.txt           # List of dependencies
 └── README.md                  # This file
 ```
@@ -40,14 +42,11 @@ medical-ai-app/
 
 ### 1. Prerequisites
 * **Python 3.10+** installed.
-* **Git** (optional, for cloning).
 * **Hardware:**
-    * *Windows:* Nvidia GPU with at least 6GB VRAM (Recommended).
+    * *Windows:* Nvidia GPU with at least 6GB VRAM.
     * *Mac:* M1/M2/M3 chip with 16GB RAM (Recommended).
 
 ### 2. Setup Virtual Environment
-It is recommended to use a virtual environment to keep your system clean.
-
 **Windows:**
 ```bash
 python -m venv ai_env
@@ -61,8 +60,7 @@ source ai_env/bin/activate
 ```
 
 ### 3. Install Dependencies
-Create a file named `requirements.txt` with the following content:
-
+Create a file named `requirements.txt`:
 ```text
 torch
 transformers
@@ -75,59 +73,88 @@ scipy
 bitsandbytes; sys_platform == "win32" or sys_platform == "linux"
 ```
 
-Then run the installation command:
+Run the install command:
 ```bash
 pip install -r requirements.txt
 ```
 
-> **⚠️ Windows User Note:** If you get a `bitsandbytes` error later, install the Windows-specific version manually by running:
-> `pip install https://github.com/jllllll/bitsandbytes-windows-webui/releases/download/wheels/bitsandbytes-0.41.1-py3-none-win_amd64.whl`
+**⚠️ WINDOWS USERS ONLY:**
+You must install the **GPU-enabled** version of PyTorch manually, or it will crash. Run this:
+```bash
+pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
+```
 
 ---
 
 ## 💻 The Application Code (`app.py`)
 
-Create a file named `app.py` and paste the code below. Choose the version that matches your OS.
+Choose the code block that matches your operating system.
 
-### **Option A: For Windows (Nvidia GPU)**
-*Uses 4-bit quantization for speed and low memory usage.*
+### **Option A: Windows (Nvidia GPU)**
+*Features: 4-bit Quantization, Disk Offloading, Crash Prevention.*
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 import gradio as gr
 
-# 1. SETUP
+# 1. SETUP PATHS
 adapter_path = "./model" 
 base_model_name = "mistralai/Mistral-7B-v0.1"
 
-# 2. LOAD MODEL (4-bit Mode)
-print("⏳ Loading model...")
-base_model = AutoModelForCausalLM.from_pretrained(
-    base_model_name,
-    torch_dtype=torch.float16,
-    device_map="auto",
-    load_in_4bit=True,  # Keeps model small (5GB)
+# [FIX] Create offload folder to prevent "KeyError"
+offload_folder = "./offload_folder"
+if not os.path.exists(offload_folder):
+    os.makedirs(offload_folder)
+
+print("⏳ Loading model (Windows Optimized)...")
+
+# 2. CONFIGURE 4-BIT LOAD (Prevents OOM)
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    llm_int8_enable_fp32_cpu_offload=True
 )
 
-model = PeftModel.from_pretrained(base_model, adapter_path)
+# 3. LOAD BASE MODEL
+base_model = AutoModelForCausalLM.from_pretrained(
+    base_model_name,
+    quantization_config=bnb_config,
+    device_map="auto",
+    torch_dtype=torch.float16,
+    offload_folder=offload_folder,
+    low_cpu_mem_usage=True
+)
+
+# 4. LOAD ADAPTERS
+model = PeftModel.from_pretrained(
+    base_model, 
+    adapter_path,
+    offload_folder=offload_folder,
+    device_map="auto"
+)
+
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
-# 3. CHAT FUNCTION
+# 5. CHAT FUNCTION
 def ask_medical_bot(message, history):
-    inputs = tokenizer(f"<s>[INST] {message} [/INST]", return_tensors="pt").to("cuda")
+    prompt = f"<s>[INST] {message} [/INST]"
+    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+    
     outputs = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.3)
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response.split("[/INST]")[-1].strip()
 
-# 4. LAUNCH UI
+# 6. LAUNCH
 gr.ChatInterface(ask_medical_bot, title="🏥 Medical AI (Windows)").launch()
 ```
 
-### **Option B: For Mac (Apple Silicon)**
-*Uses 16-bit precision with MPS acceleration.*
+### **Option B: Mac (Apple Silicon M1/M2)**
+*Features: MPS Acceleration (Metal), FP16 Precision.*
 
 ```python
 import torch
@@ -139,53 +166,48 @@ import gradio as gr
 adapter_path = "./model" 
 base_model_name = "mistralai/Mistral-7B-v0.1"
 
-# 2. LOAD MODEL (Mac Mode)
 print("🍎 Loading model on Apple Silicon...")
+
+# 2. LOAD BASE MODEL (Native Mac Support)
 base_model = AutoModelForCausalLM.from_pretrained(
     base_model_name,
     torch_dtype=torch.float16,
     device_map="mps",  # Uses Mac GPU
 )
 
+# 3. LOAD ADAPTERS
 model = PeftModel.from_pretrained(base_model, adapter_path)
-model = model.merge_and_unload() # Optimize for Mac
+model = model.merge_and_unload() # Optimization safe on Mac
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
-# 3. CHAT FUNCTION
+# 4. CHAT FUNCTION
 def ask_medical_bot(message, history):
-    inputs = tokenizer(f"<s>[INST] {message} [/INST]", return_tensors="pt").to("mps")
+    prompt = f"<s>[INST] {message} [/INST]"
+    inputs = tokenizer(prompt, return_tensors="pt").to("mps")
+    
     outputs = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.3)
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response.split("[/INST]")[-1].strip()
 
-# 4. LAUNCH UI
+# 5. LAUNCH
 gr.ChatInterface(ask_medical_bot, title="🏥 Medical AI (Mac)").launch()
 ```
 
 ---
 
-## 🏃‍♂️ How to Run
+## 🐛 Troubleshooting Journey (Common Issues)
 
-1.  Make sure your virtual environment is active.
-2.  Run the script:
-    ```bash
-    python app.py
-    ```
-    *(Note: On Mac, use `python3 app.py`)*
-3.  Wait for the model to load (1-2 minutes).
-4.  Click the link that appears in the terminal (e.g., `http://127.0.0.1:7860`).
+During development, we solved these critical issues. Check here if you get stuck.
 
----
-
-## 🐛 Troubleshooting
-
-| Error | Solution |
-| :--- | :--- |
-| **OSError: [Errno 28] No space left on device** | Your disk is full. Delete the cache at `%userprofile%\.cache\huggingface\hub` and free up 20GB. |
-| **RuntimeError: CUDA out of memory** | Close other apps. Ensure `load_in_4bit=True` is ON (Windows). Reduce `max_new_tokens`. |
-| **ModuleNotFoundError: bitsandbytes** | Run the manual install command mentioned in the **Installation** section. |
-| **App crashes on Mac** | You likely have 8GB RAM. This model requires 16GB. Use Google Colab instead. |
+| Error | Platform | Solution |
+| :--- | :--- | :--- |
+| **`OSError: [Errno 28] No space left on device`** | Win/Mac | The C: drive is full. Delete `%userprofile%\.cache\huggingface` to free up 20GB. |
+| **`ValueError: Some modules dispatched on CPU/disk...`** | Windows | You need to enable offloading. Use the **Windows Code (Option A)** provided above. |
+| **`KeyError: 'base_model.model.model...'`** | Windows | A bug in `peft`. Fixed by adding `offload_folder="./offload_folder"` to the code. |
+| **`AssertionError: Torch not compiled with CUDA`** | Windows | You have the CPU version of PyTorch. Reinstall using the command in "Installation" above. |
+| **App crashes silently / 0% Load** | Windows | Increase your Virtual Memory (Pagefile) to 25GB in System Settings. |
+| **`mps` device not found** | Mac | Ensure you are on a Mac with an M-Series chip (M1/M2/M3) and MacOS 12+. |
 
 ---
 
