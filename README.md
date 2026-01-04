@@ -1,8 +1,14 @@
 # 🏥 Medical AI Assistant (Fine-Tuned Mistral 7B)
 
-A specialized medical chatbot powered by a **Fine-Tuned Mistral 7B** model. This application uses **LoRA (Low-Rank Adaptation)** adapters trained on medical flashcards to answer health-related queries with high accuracy.
+A full stack specialized medical chatbot powered by a **Fine-Tuned Mistral 7B** model deployed with Docker. This application uses **LoRA (Low-Rank Adaptation)** adapters trained on medical flashcards to answer health-related queries with high accuracy.
 
 It is engineered to run on **consumer hardware** by utilizing **4-bit quantization** (Windows) and **MPS acceleration** (Mac).
+
+---
+The project supports:
+- 🧪 Local experimentation using Jupyter Notebook  
+- 🌐 Web-based UI (HTML/CSS/JS)  
+- 🐳 Production-ready Docker deployment  
 
 ---
 
@@ -22,67 +28,77 @@ It is engineered to run on **consumer hardware** by utilizing **4-bit quantizati
 Ensure your project folder looks exactly like this.
 
 ```text
-medical-ai-app/
-│
-├── model/                     # <--- PASTE YOUR GOOGLE DRIVE FILES HERE
-│   ├── adapter_config.json
-│   ├── adapter_model.safetensors
-│   ├── tokenizer.json
-│   ├── tokenizer.model
-│   └── special_tokens_map.json
-│
-├── app.py                     # Main application script (Choose version below)
-├── requirements.txt           # List of dependencies
-└── README.md                  # This file
+medical-ai-assistant/
+├── model/
+├── static/
+│   ├── index.html
+│   ├── script.js
+│   └── style.css
+├── app.py
+├── app_mac.py
+├── main.py
+├── Fine_Tune_LLM.ipynb
+├── jupiter-notebook.ipynb
+├── Dockerfile
+├── requirements.txt
+└── README.md                 
 ```
 
 ---
+## Model Details
 
-## 🛠️ Installation
+- Base Model: Mistral-7B  
+- Fine-Tuning: LoRA / PEFT  
+- Domain: Medical Question Answering  
 
-### 1. Prerequisites
-* **Python 3.10+** installed.
-* **Hardware:**
-    * *Windows:* Nvidia GPU with at least 6GB VRAM.
-    * *Mac:* M1/M2/M3 chip with 16GB RAM (Recommended).
+---
 
-### 2. Setup Virtual Environment
-**Windows:**
-```bash
-python -m venv ai_env
-ai_env\Scripts\activate
-```
+## 🛠️ Local Development (Jupyter Notebook)
 
-**Mac/Linux:**
-```bash
-python3 -m venv ai_env
-source ai_env/bin/activate
-```
-
-### 3. Install Dependencies
-Create a file named `requirements.txt`:
-```text
-torch
-transformers
-peft
-gradio
-accelerate
-protobuf
-sentencepiece
-scipy
-bitsandbytes; sys_platform == "win32" or sys_platform == "linux"
-```
-
-Run the install command:
-```bash
+Install dependencies:
 pip install -r requirements.txt
-```
 
-**⚠️ WINDOWS USERS ONLY:**
-You must install the **GPU-enabled** version of PyTorch manually, or it will crash. Run this:
-```bash
-pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
-```
+Run:
+jupyter notebook
+
+Use notebooks for model testing and experimentation.
+
+---
+
+## 🌐 Running Without Docker
+
+python main.py
+
+Backend runs at:
+http://localhost:8000
+
+Open static/index.html in your browser.
+
+---
+
+## 🐳 Docker Deployment
+
+Build image:
+docker build -t medical-ai-app .
+
+Run container:
+docker run -p 8000:8000 medical-ai-app
+
+---
+
+## 📡 API Endpoint
+
+POST /chat
+
+Request:
+{
+  "message": "What are the symptoms of diabetes?"
+}
+
+Response:
+{
+  "response": "Common symptoms of diabetes include..."
+}
 
 ---
 
@@ -96,22 +112,21 @@ Choose the code block that matches your operating system.
 ```python
 import torch
 import os
+from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
-import gradio as gr
 
-# 1. SETUP PATHS
+app = FastAPI()
+
+# 1. SETUP PATHS (Matches your folder structure)
 adapter_path = "./model" 
 base_model_name = "mistralai/Mistral-7B-v0.1"
-
-# [FIX] Create offload folder to prevent "KeyError"
 offload_folder = "./offload_folder"
-if not os.path.exists(offload_folder):
-    os.makedirs(offload_folder)
+os.makedirs(offload_folder, exist_ok=True)
 
-print("⏳ Loading model (Windows Optimized)...")
-
-# 2. CONFIGURE 4-BIT LOAD (Prevents OOM)
+# 2. LOAD MODEL (Reusing your stable Windows config)
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -119,38 +134,39 @@ bnb_config = BitsAndBytesConfig(
     llm_int8_enable_fp32_cpu_offload=True
 )
 
-# 3. LOAD BASE MODEL
+print("⏳ Loading Fine-Tuned Model...")
 base_model = AutoModelForCausalLM.from_pretrained(
     base_model_name,
     quantization_config=bnb_config,
     device_map="auto",
     torch_dtype=torch.float16,
-    offload_folder=offload_folder,
-    low_cpu_mem_usage=True
+    offload_folder=offload_folder
 )
-
-# 4. LOAD ADAPTERS
-model = PeftModel.from_pretrained(
-    base_model, 
-    adapter_path,
-    offload_folder=offload_folder,
-    device_map="auto"
-)
-
+model = PeftModel.from_pretrained(base_model, adapter_path, offload_folder=offload_folder)
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
-# 5. CHAT FUNCTION
-def ask_medical_bot(message, history):
-    prompt = f"<s>[INST] {message} [/INST]"
+print("✅ Model Ready for Custom Frontend!")
+
+# 3. API ENDPOINT FOR CHAT
+@app.post("/chat")
+async def chat(request: Request):
+    data = await request.json()
+    user_message = data.get("message")
+    
+    prompt = f"<s>[INST] {user_message} [/INST]"
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     
-    outputs = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.3)
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return response.split("[/INST]")[-1].strip()
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=200, temperature=0.3)
+    
+    full_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    response = full_text.split("[/INST]")[-1].strip()
+    return {"response": response}
 
-# 6. LAUNCH
-gr.ChatInterface(ask_medical_bot, title="🏥 Medical AI (Windows)").launch()
+# 4. SERVE YOUR HTML FILES
+# This looks into your 'static' folder for index.html, script.js, and style.css
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 ```
 
 ### **Option B: Mac (Apple Silicon M1/M2)**
